@@ -5,7 +5,16 @@ from __future__ import annotations
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import DateTime, Enum as SAEnum, ForeignKey, Integer, Text, func
+from sqlalchemy import (
+    DateTime,
+    Enum as SAEnum,
+    ForeignKey,
+    Index,
+    Integer,
+    Text,
+    func,
+    text,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.enums import ComplaintStatus
@@ -20,6 +29,16 @@ class Complaint(Base):
     """Жалоба пользователя на событие."""
 
     __tablename__ = "complaints"
+    __table_args__ = (
+        Index(
+            "uq_complaints_pending_reporter_event",
+            "reporter_id",
+            "event_id",
+            unique=True,
+            postgresql_where=text("status = 'PENDING'"),
+            sqlite_where=text("status = 'PENDING'"),
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     reporter_id: Mapped[int] = mapped_column(
@@ -46,8 +65,18 @@ class Complaint(Base):
         server_default=func.now(),
     )
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    resolved_by: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    resolution_comment: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    reporter: Mapped[User] = relationship(back_populates="complaints", lazy="selectin")
+    reporter: Mapped[User] = relationship(
+        back_populates="complaints",
+        foreign_keys=[reporter_id],
+        lazy="selectin",
+    )
+    resolver: Mapped[User | None] = relationship(foreign_keys=[resolved_by], lazy="selectin")
     event: Mapped[Event] = relationship(lazy="selectin")
 
     def __repr__(self) -> str:

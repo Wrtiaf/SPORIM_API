@@ -1,4 +1,4 @@
-"""Тесты комбо: коэффициент, статусы, возвраты и отсутствие двойных выплат."""
+"""Тесты комбинированных позиций: коэффициент, сторона, выплаты и отмена ног."""
 
 from typing import Any
 
@@ -12,7 +12,6 @@ from tests.helpers import (
     create_category,
     create_event,
     get_balance,
-    place_bet,
     register_user,
     set_role,
 )
@@ -36,6 +35,7 @@ async def make_event(
     moderator: dict[str, Any],
     category_id: int,
     title: str,
+    coefficient: float = 2.0,
 ) -> dict[str, Any]:
     """Создаёт и одобряет событие."""
     event = await create_event(
@@ -43,12 +43,34 @@ async def make_event(
         auth_headers(creator["access_token"]),
         category_id,
         title=title,
+        coefficient=coefficient,
     )
     return await approve_event(
         client,
         auth_headers(moderator["access_token"]),
         event["id"],
     )
+
+
+async def create_combo(
+    client: AsyncClient,
+    headers: dict[str, str],
+    legs: list[tuple[int, str]],
+    side: str = "YES",
+    amount: int = 100,
+) -> dict[str, Any]:
+    """Создаёт комбо через API."""
+    response = await client.post(
+        "/combos",
+        headers=headers,
+        json={
+            "side": side,
+            "amount": amount,
+            "legs": [{"option_id": option_id, "choice": choice} for option_id, choice in legs],
+        },
+    )
+    assert response.status_code == 201, response.text
+    return response.json()
 
 
 async def resolve_event(
@@ -66,7 +88,7 @@ async def resolve_event(
     assert response.status_code == 200, response.text
 
 
-async def test_combo_coefficient_and_win_without_double_payout(
+async def test_combo_yes_pays_product(
     client: AsyncClient,
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -76,52 +98,33 @@ async def test_combo_coefficient_and_win_without_double_payout(
 
     bettor = await register_user(client, "bettor")
     headers = auth_headers(bettor["access_token"])
-
-    bet_a = await place_bet(client, headers, event_a["options"][0]["id"], "YES", 100)
-    bet_b = await place_bet(client, headers, event_b["options"][0]["id"], "YES", 100)
-
-    combo_response = await client.post(
-        "/combos",
-        headers=headers,
-        json={"bet_ids": [bet_a["id"], bet_b["id"]]},
+    combo = await create_combo(
+        client,
+        headers,
+        [(event_a["options"][0]["id"], "YES"), (event_b["options"][0]["id"], "YES")],
     )
-    assert combo_response.status_code == 201, combo_response.text
-    combo = combo_response.json()
-    assert combo["total_coefficient"] == 4.0
+
+    assert combo["side"] == "YES"
+    assert combo["amount"] == 100
+    assert combo["entry_coefficient"] == 4.0
+    assert combo["potential_payout"] == 400
     assert combo["status"] == "ACTIVE"
-    assert len(combo["bets"]) == 2
-
-    # Ставка не может входить во второе комбо.
-    duplicate = await client.post(
-        "/combos",
-        headers=headers,
-        json={"bet_ids": [bet_a["id"]]},
-    )
-    assert duplicate.status_code == 409
-    assert duplicate.json()["code"] == "bet_already_in_combo"
+    assert len(combo["legs"]) == 2
+    assert await get_balance(client, headers) == 900
 
     await resolve_event(client, moderator, event_a["id"], event_a["options"][0]["id"])
-    still_active = (await client.get(f"/combos/{combo['id']}", headers=headers)).json()
-    assert still_active["status"] == "ACTIVE"
+    active = (await client.get(f"/combos/{combo['id']}", headers=headers)).json()
+    assert active["status"] == "ACTIVE"
 
     await resolve_event(client, moderator, event_b["id"], event_b["options"][0]["id"])
-    won = (await client.get(f"/combos/{combo['id']}", headers=headers)).json()
-    assert won["status"] == "WON"
-    assert won["total_coefficient"] == 4.0
-
-    # Выплаты начислены только по ставкам: 1000 - 100 - 100 + 200 + 200.
-    assert await get_balance(client, headers) == 1200
-
-    repeated = await client.post(
-        f"/moderation/events/{event_b['id']}/resolve",
-        headers=auth_headers(moderator["access_token"]),
-        json={"winning_option_id": event_b["options"][0]["id"]},
-    )
-    assert repeated.status_code == 409
-    assert await get_balance(client, headers) == 1200
+    settled = (await client.get(f"/combos/{combo['id']}", headers=headers)).json()
+    assert settled["status"] == "SETTLED"
+    assert settled["payout"] == 400
+    assert all(leg["result"] == "WON" for leg in settled["legs"])
+    assert await get_balance(client, headers) == 1300
 
 
-async def test_combo_lost_when_any_leg_lost(
+async def test_combo_yes_loses_when_any_leg_loses(
     client: AsyncClient,
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -131,30 +134,22 @@ async def test_combo_lost_when_any_leg_lost(
 
     bettor = await register_user(client, "bettor")
     headers = auth_headers(bettor["access_token"])
-    bet_a = await place_bet(client, headers, event_a["options"][0]["id"], "YES", 100)
-    bet_b = await place_bet(client, headers, event_b["options"][0]["id"], "YES", 100)
-
-    combo = (
-        await client.post(
-            "/combos",
-            headers=headers,
-            json={"bet_ids": [bet_a["id"], bet_b["id"]]},
-        )
-    ).json()
+    combo = await create_combo(
+        client,
+        headers,
+        [(event_a["options"][0]["id"], "YES"), (event_b["options"][0]["id"], "YES")],
+    )
 
     await resolve_event(client, moderator, event_a["id"], event_a["options"][1]["id"])
-    lost = (await client.get(f"/combos/{combo['id']}", headers=headers)).json()
-    assert lost["status"] == "LOST"
-
     await resolve_event(client, moderator, event_b["id"], event_b["options"][0]["id"])
-    still_lost = (await client.get(f"/combos/{combo['id']}", headers=headers)).json()
-    assert still_lost["status"] == "LOST"
 
-    # 1000 - 100 - 100 + 200 (вторая ставка выиграла).
-    assert await get_balance(client, headers) == 1000
+    settled = (await client.get(f"/combos/{combo['id']}", headers=headers)).json()
+    assert settled["status"] == "SETTLED"
+    assert settled["payout"] == 0
+    assert await get_balance(client, headers) == 900
 
 
-async def test_combo_excludes_refunded_leg(
+async def test_combo_no_pays_complement(
     client: AsyncClient,
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -164,17 +159,41 @@ async def test_combo_excludes_refunded_leg(
 
     bettor = await register_user(client, "bettor")
     headers = auth_headers(bettor["access_token"])
-    bet_a = await place_bet(client, headers, event_a["options"][0]["id"], "YES", 100)
-    bet_b = await place_bet(client, headers, event_b["options"][0]["id"], "YES", 100)
+    combo = await create_combo(
+        client,
+        headers,
+        [(event_a["options"][0]["id"], "YES"), (event_b["options"][0]["id"], "YES")],
+        side="NO",
+    )
 
-    combo = (
-        await client.post(
-            "/combos",
-            headers=headers,
-            json={"bet_ids": [bet_a["id"], bet_b["id"]]},
-        )
-    ).json()
-    assert combo["total_coefficient"] == 4.0
+    assert combo["entry_coefficient"] == 1.333333
+    assert combo["potential_payout"] == 133
+    assert await get_balance(client, headers) == 900
+
+    await resolve_event(client, moderator, event_a["id"], event_a["options"][1]["id"])
+    await resolve_event(client, moderator, event_b["id"], event_b["options"][0]["id"])
+
+    settled = (await client.get(f"/combos/{combo['id']}", headers=headers)).json()
+    assert settled["status"] == "SETTLED"
+    assert settled["payout"] == 133
+    assert await get_balance(client, headers) == 1033
+
+
+async def test_combo_half_leg_reduces_payout(
+    client: AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    creator, moderator, category_id = await setup_base(client, session_factory)
+    event_a = await make_event(client, creator, moderator, category_id, "Событие A")
+    event_b = await make_event(client, creator, moderator, category_id, "Событие B")
+
+    bettor = await register_user(client, "bettor")
+    headers = auth_headers(bettor["access_token"])
+    combo = await create_combo(
+        client,
+        headers,
+        [(event_a["options"][0]["id"], "YES"), (event_b["options"][0]["id"], "YES")],
+    )
 
     cancel = await client.post(
         f"/moderation/events/{event_a['id']}/cancel",
@@ -182,93 +201,108 @@ async def test_combo_excludes_refunded_leg(
     )
     assert cancel.status_code == 200
 
-    after_cancel = (await client.get(f"/combos/{combo['id']}", headers=headers)).json()
-    assert after_cancel["status"] == "ACTIVE"
-    assert after_cancel["total_coefficient"] == 2.0
+    active = (await client.get(f"/combos/{combo['id']}", headers=headers)).json()
+    assert active["status"] == "ACTIVE"
+    assert active["legs"][0]["result"] == "HALF"
 
     await resolve_event(client, moderator, event_b["id"], event_b["options"][0]["id"])
-    won = (await client.get(f"/combos/{combo['id']}", headers=headers)).json()
-    assert won["status"] == "WON"
-    assert won["total_coefficient"] == 2.0
-
-    # Возврат 100 по отменённой ставке и выплата 200 по выигравшей.
+    settled = (await client.get(f"/combos/{combo['id']}", headers=headers)).json()
+    assert settled["payout"] == 200
     assert await get_balance(client, headers) == 1100
 
 
-async def test_combo_with_all_legs_refunded_is_void(
+async def test_combo_rejects_duplicate_event(
     client: AsyncClient,
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """Если все ставки возвращены, комбо не выигрывает и не проигрывает."""
+    creator, moderator, category_id = await setup_base(client, session_factory)
+    event = await make_event(client, creator, moderator, category_id, "Событие A")
+
+    bettor = await register_user(client, "bettor")
+    response = await client.post(
+        "/combos",
+        headers=auth_headers(bettor["access_token"]),
+        json={
+            "side": "YES",
+            "amount": 100,
+            "legs": [
+                {"option_id": event["options"][0]["id"], "choice": "YES"},
+                {"option_id": event["options"][1]["id"], "choice": "YES"},
+            ],
+        },
+    )
+    assert response.status_code == 409
+    assert response.json()["code"] == "duplicate_combo_event"
+
+
+async def test_combo_rejects_own_event(
+    client: AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    creator, moderator, category_id = await setup_base(client, session_factory)
+    event_a = await make_event(client, creator, moderator, category_id, "Событие A")
+    event_b = await make_event(client, creator, moderator, category_id, "Событие B")
+
+    response = await client.post(
+        "/combos",
+        headers=auth_headers(creator["access_token"]),
+        json={
+            "side": "YES",
+            "amount": 100,
+            "legs": [
+                {"option_id": event_a["options"][0]["id"], "choice": "YES"},
+                {"option_id": event_b["options"][0]["id"], "choice": "YES"},
+            ],
+        },
+    )
+    assert response.status_code == 403
+    assert response.json()["code"] == "own_event_combo"
+
+
+async def test_combo_rejects_insufficient_balance(
+    client: AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     creator, moderator, category_id = await setup_base(client, session_factory)
     event_a = await make_event(client, creator, moderator, category_id, "Событие A")
     event_b = await make_event(client, creator, moderator, category_id, "Событие B")
 
     bettor = await register_user(client, "bettor")
-    headers = auth_headers(bettor["access_token"])
-    bet_a = await place_bet(client, headers, event_a["options"][0]["id"], "YES", 100)
-    bet_b = await place_bet(client, headers, event_b["options"][0]["id"], "YES", 100)
-
-    combo = (
-        await client.post(
-            "/combos",
-            headers=headers,
-            json={"bet_ids": [bet_a["id"], bet_b["id"]]},
-        )
-    ).json()
-
-    for event in (event_a, event_b):
-        response = await client.post(
-            f"/moderation/events/{event['id']}/cancel",
-            headers=auth_headers(moderator["access_token"]),
-        )
-        assert response.status_code == 200
-
-    after = (await client.get(f"/combos/{combo['id']}", headers=headers)).json()
-    assert after["status"] == "ACTIVE"
-    assert after["total_coefficient"] == 1.0
-    assert await get_balance(client, headers) == 1000
+    response = await client.post(
+        "/combos",
+        headers=auth_headers(bettor["access_token"]),
+        json={
+            "side": "YES",
+            "amount": 2000,
+            "legs": [
+                {"option_id": event_a["options"][0]["id"], "choice": "YES"},
+                {"option_id": event_b["options"][0]["id"], "choice": "YES"},
+            ],
+        },
+    )
+    assert response.status_code == 422
+    assert response.json()["code"] == "insufficient_balance"
+    assert await get_balance(client, auth_headers(bettor["access_token"])) == 1000
 
 
-async def test_combo_cannot_include_resolved_bet(
+async def test_combo_foreign_view_is_hidden(
     client: AsyncClient,
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     creator, moderator, category_id = await setup_base(client, session_factory)
-    event = await make_event(client, creator, moderator, category_id, "Событие A")
-
-    bettor = await register_user(client, "bettor")
-    headers = auth_headers(bettor["access_token"])
-    bet = await place_bet(client, headers, event["options"][0]["id"], "YES", 100)
-
-    await resolve_event(client, moderator, event["id"], event["options"][0]["id"])
-
-    response = await client.post("/combos", headers=headers, json={"bet_ids": [bet["id"]]})
-    assert response.status_code == 409
-    assert response.json()["code"] == "bet_not_pending"
-
-
-async def test_combo_cannot_include_foreign_bet(
-    client: AsyncClient,
-    session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    creator, moderator, category_id = await setup_base(client, session_factory)
-    event = await make_event(client, creator, moderator, category_id, "Событие A")
+    event_a = await make_event(client, creator, moderator, category_id, "Событие A")
+    event_b = await make_event(client, creator, moderator, category_id, "Событие B")
 
     owner = await register_user(client, "owner")
     stranger = await register_user(client, "stranger")
-    bet = await place_bet(
+    combo = await create_combo(
         client,
         auth_headers(owner["access_token"]),
-        event["options"][0]["id"],
-        "YES",
-        100,
+        [(event_a["options"][0]["id"], "YES"), (event_b["options"][0]["id"], "YES")],
     )
 
-    response = await client.post(
-        "/combos",
+    response = await client.get(
+        f"/combos/{combo['id']}",
         headers=auth_headers(stranger["access_token"]),
-        json={"bet_ids": [bet["id"]]},
     )
     assert response.status_code == 404
-    assert response.json()["code"] == "bet_not_found"

@@ -5,7 +5,18 @@ from __future__ import annotations
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import DateTime, Enum as SAEnum, Float, ForeignKey, Integer, String, Text, func, text
+from sqlalchemy import (
+    CheckConstraint,
+    DateTime,
+    Enum as SAEnum,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    func,
+    text,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.enums import EventStatus
@@ -22,6 +33,9 @@ class Event(Base):
     """Событие, на исход которого пользователи делают прогнозы."""
 
     __tablename__ = "events"
+    __table_args__ = (
+        CheckConstraint("fixed_coefficient > 1", name="fixed_coefficient_gt_one"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     title: Mapped[str] = mapped_column(String(200), nullable=False, index=True)
@@ -51,6 +65,22 @@ class Event(Base):
         default=2.0,
         server_default=text("2.0"),
     )
+    winning_option_id: Mapped[int | None] = mapped_column(
+        ForeignKey(
+            "options.id",
+            use_alter=True,
+            name="fk_events_winning_option_id_options",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+        index=True,
+    )
+    rejection_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    approved_by: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -58,6 +88,11 @@ class Event(Base):
         index=True,
     )
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        index=True,
+    )
     resolved_by: Mapped[int | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"),
         nullable=True,
@@ -70,9 +105,15 @@ class Event(Base):
         lazy="selectin",
     )
     resolver: Mapped[User | None] = relationship(foreign_keys=[resolved_by], lazy="selectin")
+    approver: Mapped[User | None] = relationship(foreign_keys=[approved_by], lazy="selectin")
+    winner: Mapped[Option | None] = relationship(
+        foreign_keys=[winning_option_id],
+        lazy="selectin",
+    )
     options: Mapped[list[Option]] = relationship(
         back_populates="event",
         cascade="all, delete-orphan",
+        foreign_keys="Option.event_id",
         order_by="Option.id",
         lazy="selectin",
     )

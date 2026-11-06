@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Float, ForeignKey, Integer, String, UniqueConstraint, text
+from sqlalchemy import CheckConstraint, Float, ForeignKey, Integer, String, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -25,6 +25,12 @@ class Option(Base):
     __tablename__ = "options"
     __table_args__ = (
         UniqueConstraint("event_id", "title", name="uq_options_event_id_title"),
+        CheckConstraint("yes_count >= 0", name="yes_count_non_negative"),
+        CheckConstraint("no_count >= 0", name="no_count_non_negative"),
+        CheckConstraint(
+            "current_percentage >= 0 AND current_percentage <= 100",
+            name="current_percentage_range",
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -53,7 +59,7 @@ class Option(Base):
         server_default=text("0"),
     )
 
-    event: Mapped[Event] = relationship(back_populates="options")
+    event: Mapped[Event] = relationship(back_populates="options", foreign_keys=[event_id])
     bets: Mapped[list[Bet]] = relationship(back_populates="option")
 
     @property

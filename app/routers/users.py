@@ -1,7 +1,7 @@
 """Профиль, баланс, статистика и история текущего пользователя."""
 
 from fastapi import APIRouter
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 
 from app.core.enums import BetStatus
@@ -10,6 +10,7 @@ from app.core.money import calculate_payout
 from app.dependencies import CurrentUser, DbSession, LimitParam, OffsetParam
 from app.models.bet import Bet
 from app.models.event import Event
+from app.models.user import User
 from app.schemas.bet import BetRead
 from app.schemas.common import Page
 from app.schemas.event import EventRead
@@ -47,11 +48,37 @@ async def update_me(
 ) -> UserRead:
     """Обновляет профиль текущего пользователя."""
     changes = payload.model_dump(exclude_unset=True)
+    new_username = changes.get("username")
+    new_email = changes.get("email")
 
-    if changes.get("username") is not None:
-        current_user.username = changes["username"].strip()
-    if changes.get("email") is not None:
-        current_user.email = str(changes["email"]).lower()
+    if new_username is not None:
+        new_username = new_username.strip()
+        existing = await db.scalar(
+            select(User.id).where(
+                func.lower(User.username) == new_username.lower(),
+                User.id != current_user.id,
+            )
+        )
+        if existing is not None:
+            raise ConflictError(
+                "Пользователь с таким username или email уже существует",
+                code="user_already_exists",
+            )
+        current_user.username = new_username
+    if new_email is not None:
+        new_email = str(new_email).lower()
+        existing = await db.scalar(
+            select(User.id).where(
+                or_(User.email == new_email, func.lower(User.email) == new_email),
+                User.id != current_user.id,
+            )
+        )
+        if existing is not None:
+            raise ConflictError(
+                "Пользователь с таким username или email уже существует",
+                code="user_already_exists",
+            )
+        current_user.email = new_email
 
     try:
         await db.commit()
@@ -185,7 +212,7 @@ async def get_my_events(
     offset: OffsetParam = 0,
 ) -> Page[EventRead]:
     """Возвращает созданные пользователем события."""
-    conditions = [Event.creator_id == current_user.id]
+    conditions = [Event.creator_id == current_user.id, Event.deleted_at.is_(None)]
 
     total = await db.scalar(select(func.count(Event.id)).where(*conditions)) or 0
     events = list(

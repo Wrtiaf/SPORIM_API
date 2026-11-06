@@ -5,7 +5,16 @@ from __future__ import annotations
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import DateTime, Enum as SAEnum, Float, ForeignKey, Integer, UniqueConstraint, func
+from sqlalchemy import (
+    CheckConstraint,
+    DateTime,
+    Enum as SAEnum,
+    Float,
+    ForeignKey,
+    Integer,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.enums import BetChoice, BetStatus
@@ -13,7 +22,6 @@ from app.core.money import calculate_payout
 from app.database import Base
 
 if TYPE_CHECKING:
-    from app.models.combo import Combo
     from app.models.event import Event
     from app.models.option import Option
     from app.models.user import User
@@ -29,6 +37,7 @@ class Bet(Base):
     __tablename__ = "bets"
     __table_args__ = (
         UniqueConstraint("user_id", "event_id", name="uq_bets_user_id_event_id"),
+        CheckConstraint("amount > 0", name="amount_positive"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -70,10 +79,6 @@ class Bet(Base):
     user: Mapped[User] = relationship(back_populates="bets")
     event: Mapped[Event] = relationship(back_populates="bets", lazy="selectin")
     option: Mapped[Option] = relationship(back_populates="bets", lazy="selectin")
-    combos: Mapped[list[Combo]] = relationship(
-        secondary="combo_bets",
-        back_populates="bets",
-    )
 
     @property
     def potential_payout(self) -> int:

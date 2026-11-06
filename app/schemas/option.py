@@ -20,6 +20,13 @@ class OptionCreate(BaseModel):
         return stripped
 
 
+class OptionShort(ORMModel):
+    """Краткая информация о варианте."""
+
+    id: int
+    title: str
+
+
 class OptionRead(ORMModel):
     """Вариант исхода с текущими процентами."""
 

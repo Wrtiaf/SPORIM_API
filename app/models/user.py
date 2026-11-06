@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Boolean, DateTime, Enum as SAEnum, Integer, String, func, text
+from sqlalchemy import Boolean, DateTime, Enum as SAEnum, Index, Integer, String, func, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.roles import Role
@@ -19,11 +19,7 @@ if TYPE_CHECKING:
 
 
 class User(Base):
-    """Пользователь платформы.
-
-    Баланс и статистика хранятся денормализованно ради быстрых ответов API;
-    изменения выполняются атомарными SQL-апдейтами.
-    """
+    """Пользователь платформы."""
 
     __tablename__ = "users"
 
@@ -49,18 +45,6 @@ class User(Base):
         default=True,
         server_default=text("true"),
     )
-    total_bets: Mapped[int] = mapped_column(
-        Integer,
-        nullable=False,
-        default=0,
-        server_default=text("0"),
-    )
-    won_bets: Mapped[int] = mapped_column(
-        Integer,
-        nullable=False,
-        default=0,
-        server_default=text("0"),
-    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -73,13 +57,20 @@ class User(Base):
         onupdate=func.now(),
     )
 
+    __table_args__ = (
+        Index("uq_users_username_lower", func.lower(username), unique=True),
+    )
+
     bets: Mapped[list[Bet]] = relationship(back_populates="user")
     combos: Mapped[list[Combo]] = relationship(back_populates="user")
     created_events: Mapped[list[Event]] = relationship(
         back_populates="creator",
         foreign_keys="Event.creator_id",
     )
-    complaints: Mapped[list[Complaint]] = relationship(back_populates="reporter")
+    complaints: Mapped[list[Complaint]] = relationship(
+        back_populates="reporter",
+        foreign_keys="Complaint.reporter_id",
+    )
 
     def __repr__(self) -> str:
         return f"<User id={self.id} username={self.username!r} role={self.role.value}>"

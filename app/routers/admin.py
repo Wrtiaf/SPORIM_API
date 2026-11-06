@@ -65,8 +65,20 @@ async def list_users(
     if is_active is not None:
         conditions.append(User.is_active.is_(is_active))
     if search:
-        pattern = f"%{search.strip()}%"
-        conditions.append(or_(User.username.ilike(pattern), User.email.ilike(pattern)))
+        stripped = search.strip()
+        if len(stripped) < 2:
+            raise ValidationAppError(
+                "Поисковый запрос должен содержать минимум 2 символа",
+                code="search_query_too_short",
+            )
+        escaped = stripped.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        pattern = f"%{escaped}%"
+        conditions.append(
+            or_(
+                User.username.ilike(pattern, escape="\\"),
+                User.email.ilike(pattern, escape="\\"),
+            )
+        )
 
     total = await _count(db, User, *conditions)
     users = list(
@@ -178,11 +190,37 @@ async def platform_stats(_: AdminUser, db: DbSession) -> PlatformStats:
         moderators=await _count(db, User, User.role == Role.MODERATOR),
         admins=await _count(db, User, User.role == Role.ADMIN),
         categories_total=await _count(db, Category),
-        events_total=await _count(db, Event),
-        events_pending=await _count(db, Event, Event.status == EventStatus.PENDING_MODERATION),
-        events_active=await _count(db, Event, Event.status == EventStatus.ACTIVE),
-        events_closed=await _count(db, Event, Event.status == EventStatus.CLOSED),
-        events_cancelled=await _count(db, Event, Event.status == EventStatus.CANCELLED),
+        events_total=await _count(db, Event, Event.deleted_at.is_(None)),
+        events_pending=await _count(
+            db,
+            Event,
+            Event.status == EventStatus.PENDING_MODERATION,
+            Event.deleted_at.is_(None),
+        ),
+        events_active=await _count(
+            db,
+            Event,
+            Event.status == EventStatus.ACTIVE,
+            Event.deleted_at.is_(None),
+        ),
+        events_closed=await _count(
+            db,
+            Event,
+            Event.status == EventStatus.CLOSED,
+            Event.deleted_at.is_(None),
+        ),
+        events_cancelled=await _count(
+            db,
+            Event,
+            Event.status == EventStatus.CANCELLED,
+            Event.deleted_at.is_(None),
+        ),
+        events_rejected=await _count(
+            db,
+            Event,
+            Event.status == EventStatus.REJECTED,
+            Event.deleted_at.is_(None),
+        ),
         bets_total=await _count(db, Bet),
         bets_pending=await _count(db, Bet, Bet.status == BetStatus.PENDING),
         bets_won=await _count(db, Bet, Bet.status == BetStatus.WON),

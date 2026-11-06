@@ -1,35 +1,63 @@
-"""Схемы комбо-ставок."""
+"""Схемы комбинированных позиций."""
 
 from datetime import datetime
 
 from pydantic import BaseModel, Field, field_validator
 
-from app.core.enums import ComboStatus
-from app.schemas.bet import BetRead
+from app.core.enums import BetChoice, ComboLegResult, ComboSide, ComboStatus
 from app.schemas.common import ORMModel
+from app.schemas.event import EventShort
+from app.schemas.option import OptionShort
+
+
+class ComboLegCreate(BaseModel):
+    """Нога создаваемой комбинированной позиции."""
+
+    option_id: int = Field(gt=0)
+    choice: BetChoice = Field(description="YES или NO для выбранного варианта")
 
 
 class ComboCreate(BaseModel):
-    """Создание комбо из списка ставок."""
+    """Создание комбинированной позиции."""
 
-    bet_ids: list[int] = Field(min_length=1, max_length=20)
+    side: ComboSide = Field(description="YES — все ноги выиграют, NO — хотя бы одна проиграет")
+    amount: int = Field(ge=1, le=1_000_000)
+    legs: list[ComboLegCreate] = Field(min_length=2, max_length=20)
 
-    @field_validator("bet_ids")
+    @field_validator("legs")
     @classmethod
-    def _unique_bet_ids(cls, bet_ids: list[int]) -> list[int]:
-        if len(set(bet_ids)) != len(bet_ids):
-            raise ValueError("bet_ids не должен содержать повторов")
-        if any(bet_id <= 0 for bet_id in bet_ids):
-            raise ValueError("bet_ids должен содержать положительные идентификаторы")
-        return bet_ids
+    def _unique_legs(cls, legs: list[ComboLegCreate]) -> list[ComboLegCreate]:
+        option_ids = [leg.option_id for leg in legs]
+        if len(set(option_ids)) != len(option_ids):
+            raise ValueError("option_id не должен повторяться")
+        return legs
+
+
+class ComboLegRead(ORMModel):
+    """Нога комбинированной позиции."""
+
+    id: int
+    event_id: int
+    option_id: int
+    choice: BetChoice
+    coefficient: float
+    result: ComboLegResult
+    resolved_at: datetime | None
+    event: EventShort
+    option: OptionShort
 
 
 class ComboRead(ORMModel):
-    """Комбо с входящими ставками."""
+    """Комбинированная позиция с ногами."""
 
     id: int
     user_id: int
-    total_coefficient: float
+    side: ComboSide
+    amount: int
+    entry_coefficient: float
+    potential_payout: int
+    payout: int | None
     status: ComboStatus
     created_at: datetime
-    bets: list[BetRead]
+    settled_at: datetime | None
+    legs: list[ComboLegRead]

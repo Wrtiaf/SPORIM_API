@@ -160,9 +160,48 @@ async def test_bet_with_insufficient_balance_is_rejected(
         headers=headers,
         json={"choice": "YES", "amount": 2000},
     )
-    assert response.status_code == 409
+    assert response.status_code == 422
     assert response.json()["code"] == "insufficient_balance"
     assert await get_balance(client, headers) == 1000
+
+
+async def test_bet_on_own_event_is_rejected(
+    client: AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    creator, _, event = await prepare_event(client, session_factory)
+
+    response = await client.post(
+        f"/options/{event['options'][0]['id']}/bet",
+        headers=auth_headers(creator["access_token"]),
+        json={"choice": "YES", "amount": 10},
+    )
+    assert response.status_code == 403
+    assert response.json()["code"] == "own_event_bet"
+    assert await get_balance(client, auth_headers(creator["access_token"])) == 1000
+
+
+async def test_foreign_bet_is_hidden(
+    client: AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    _, _, event = await prepare_event(client, session_factory)
+    owner = await register_user(client, "owner")
+    stranger = await register_user(client, "stranger")
+
+    bet = await place_bet(
+        client,
+        auth_headers(owner["access_token"]),
+        event["options"][0]["id"],
+        amount=10,
+    )
+
+    response = await client.get(
+        f"/bets/{bet['id']}",
+        headers=auth_headers(stranger["access_token"]),
+    )
+    assert response.status_code == 404
+    assert response.json()["code"] == "bet_not_found"
 
 
 async def test_percentages_are_calculated_per_option(

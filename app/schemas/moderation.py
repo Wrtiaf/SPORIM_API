@@ -5,6 +5,12 @@ from pydantic import BaseModel, Field, field_validator
 from app.core.enums import ComplaintStatus
 
 
+class ApproveEventRequest(BaseModel):
+    """Одобрение события с подтверждением коэффициента."""
+
+    fixed_coefficient: float | None = Field(default=None, ge=1.01, le=10.0)
+
+
 class ResolveEventRequest(BaseModel):
     """Фиксация победного варианта события."""
 
@@ -29,6 +35,7 @@ class ComplaintResolveRequest(BaseModel):
     """Обработка жалобы модератором."""
 
     status: ComplaintStatus = Field(description="RESOLVED или REJECTED")
+    resolution_comment: str | None = Field(default=None, max_length=2000)
 
     @field_validator("status")
     @classmethod

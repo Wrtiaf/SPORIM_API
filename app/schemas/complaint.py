@@ -37,3 +37,5 @@ class ComplaintRead(ORMModel):
     status: ComplaintStatus
     created_at: datetime
     resolved_at: datetime | None
+    resolved_by: int | None
+    resolution_comment: str | None

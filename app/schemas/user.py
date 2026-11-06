@@ -24,8 +24,6 @@ class UserRead(ORMModel):
     balance: int
     role: Role
     is_active: bool
-    total_bets: int
-    won_bets: int
     created_at: datetime
 
 

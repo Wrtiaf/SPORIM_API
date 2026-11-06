@@ -31,6 +31,7 @@ class PlatformStats(BaseModel):
     events_active: int
     events_closed: int
     events_cancelled: int
+    events_rejected: int
 
     bets_total: int
     bets_pending: int

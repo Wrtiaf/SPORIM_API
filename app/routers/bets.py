@@ -3,7 +3,13 @@
 from fastapi import APIRouter, status
 from sqlalchemy import func, select
 
-from app.dependencies import CurrentUser, DbSession, LimitParam, OffsetParam
+from app.dependencies import (
+    CurrentUser,
+    DbSession,
+    LimitParam,
+    OffsetParam,
+    OptionalCurrentUser,
+)
 from app.models.bet import Bet
 from app.models.option import Option
 from app.schemas.bet import BetRead
@@ -21,9 +27,14 @@ router = APIRouter(tags=["Bets"])
     description="Возвращает варианты события с количеством голосов и процентами.",
     responses={404: {"description": "Событие не найдено"}},
 )
-async def get_event_options(event_id: int, db: DbSession) -> list[OptionRead]:
+async def get_event_options(
+    event_id: int,
+    db: DbSession,
+    user: OptionalCurrentUser,
+) -> list[OptionRead]:
     """Возвращает варианты указанного события."""
-    await event_service.get_event_or_404(db, event_id)
+    event = await event_service.get_event_or_404(db, event_id)
+    event_service.ensure_event_visible(event, user)
     options = (
         await db.scalars(select(Option).where(Option.event_id == event_id).order_by(Option.id))
     ).all()
@@ -43,10 +54,8 @@ async def get_event_options(event_id: int, db: DbSession) -> list[OptionRead]:
     responses={
         401: {"description": "Требуется авторизация"},
         404: {"description": "Вариант не найден"},
-        409: {
-            "description": "Событие не активно, ставка уже существует или "
-            "недостаточно баллов"
-        },
+        409: {"description": "Событие не активно или ставка уже существует"},
+        422: {"description": "Недостаточно баллов"},
     },
 )
 async def place_bet(
@@ -102,7 +111,6 @@ async def list_my_bets(
     summary="Детали ставки",
     description="Автор ставки, модератор или администратор может посмотреть детали.",
     responses={
-        403: {"description": "Нет доступа к чужой ставке"},
         404: {"description": "Ставка не найдена"},
     },
 )

@@ -39,6 +39,24 @@ async def test_register_duplicate_username(client: AsyncClient) -> None:
     assert response.json()["code"] == "user_already_exists"
 
 
+async def test_username_is_case_insensitive_but_keeps_case(client: AsyncClient) -> None:
+    data = await register_user(client, "Alice")
+    assert data["user"]["username"] == "Alice"
+
+    duplicate = await client.post(
+        "/auth/register",
+        json={"username": "alice", "email": "other@example.com", "password": PASSWORD},
+    )
+    assert duplicate.status_code == 409
+    assert duplicate.json()["code"] == "user_already_exists"
+
+    login = await client.post(
+        "/auth/login",
+        json={"identifier": "ALICE", "password": PASSWORD},
+    )
+    assert login.status_code == 200
+
+
 async def test_register_duplicate_email(client: AsyncClient) -> None:
     await register_user(client, "alice")
 

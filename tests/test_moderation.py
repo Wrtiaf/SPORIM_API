@@ -5,7 +5,11 @@ from typing import Any
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from sqlalchemy import select
+
+from app.core.enums import ModerationAction
 from app.core.roles import Role
+from app.models.moderation_log import ModerationLog
 from tests.helpers import (
     PASSWORD,
     approve_event,
@@ -62,6 +66,50 @@ async def test_pending_events_and_approve(
     assert repeated.status_code == 409
 
 
+async def test_approve_with_coefficient_and_audit_log(
+    client: AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    creator, moderator, category_id = await setup_users(client, session_factory)
+    event = await create_event(client, auth_headers(creator["access_token"]), category_id)
+
+    approved = await client.post(
+        f"/moderation/events/{event['id']}/approve",
+        headers=auth_headers(moderator["access_token"]),
+        json={"fixed_coefficient": 3.25},
+    )
+    assert approved.status_code == 200
+    assert approved.json()["fixed_coefficient"] == 3.25
+    assert approved.json()["approved_by"] == moderator["user"]["id"]
+    assert approved.json()["approved_at"] is not None
+
+    async with session_factory() as session:
+        logs = list((await session.scalars(select(ModerationLog))).all())
+    assert len(logs) == 1
+    assert logs[0].action is ModerationAction.APPROVE
+    assert logs[0].moderator_id == moderator["user"]["id"]
+
+
+async def test_moderator_cannot_moderate_own_event(
+    client: AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    _, moderator, category_id = await setup_users(client, session_factory)
+    event = await create_event(client, auth_headers(moderator["access_token"]), category_id)
+    headers = auth_headers(moderator["access_token"])
+
+    approve = await client.post(f"/moderation/events/{event['id']}/approve", headers=headers)
+    assert approve.status_code == 403
+    assert approve.json()["code"] == "self_moderation_forbidden"
+
+    reject = await client.post(
+        f"/moderation/events/{event['id']}/reject",
+        headers=headers,
+        json={"reason": "Своё событие"},
+    )
+    assert reject.status_code == 403
+
+
 async def test_reject_pending_event(
     client: AsyncClient,
     session_factory: async_sessionmaker[AsyncSession],
@@ -75,7 +123,8 @@ async def test_reject_pending_event(
         json={"reason": "Нарушает правила платформы"},
     )
     assert response.status_code == 200
-    assert response.json()["status"] == "CANCELLED"
+    assert response.json()["status"] == "REJECTED"
+    assert response.json()["rejection_reason"] == "Нарушает правила платформы"
 
 
 async def test_resolve_rejects_foreign_option(
@@ -148,8 +197,11 @@ async def test_complaints_flow(
         json={"status": "RESOLVED"},
     )
     assert resolved.status_code == 200
-    assert resolved.json()["status"] == "RESOLVED"
-    assert resolved.json()["resolved_at"] is not None
+    payload = resolved.json()
+    assert payload["status"] == "RESOLVED"
+    assert payload["resolved_at"] is not None
+    assert payload["resolved_by"] == moderator["user"]["id"]
+    assert payload["resolution_comment"] is None
 
     repeated = await client.post(
         f"/moderation/complaints/{complaint['id']}/resolve",

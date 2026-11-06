@@ -2,7 +2,9 @@
 
 from fastapi import APIRouter, status
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 
+from app.config import settings
 from app.core.enums import ComplaintStatus
 from app.core.exceptions import ConflictError
 from app.dependencies import CurrentUser, DbSession, LimitParam, OffsetParam
@@ -37,6 +39,18 @@ async def create_complaint(
     """Создаёт жалобу на событие."""
     await get_event_or_404(db, payload.event_id)
 
+    pending_complaints = await db.scalar(
+        select(func.count(Complaint.id)).where(
+            Complaint.reporter_id == current_user.id,
+            Complaint.status == ComplaintStatus.PENDING,
+        )
+    )
+    if int(pending_complaints or 0) >= settings.MAX_PENDING_COMPLAINTS_PER_USER:
+        raise ConflictError(
+            "Достигнут лимит необработанных жалоб",
+            code="pending_complaint_limit",
+        )
+
     existing = await db.scalar(
         select(Complaint.id).where(
             Complaint.reporter_id == current_user.id,
@@ -57,7 +71,15 @@ async def create_complaint(
         status=ComplaintStatus.PENDING,
     )
     db.add(complaint)
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError as exc:
+        await db.rollback()
+        raise ConflictError(
+            "У вас уже есть необработанная жалоба на это событие",
+            code="complaint_already_exists",
+        ) from exc
+
     await db.refresh(complaint)
     return ComplaintRead.model_validate(complaint)
 

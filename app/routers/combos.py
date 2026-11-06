@@ -1,4 +1,4 @@
-"""Комбо-ставки."""
+"""Комбинированные позиции."""
 
 from fastapi import APIRouter, status
 from sqlalchemy import func, select
@@ -18,13 +18,14 @@ router = APIRouter(prefix="/combos", tags=["Combos"])
     status_code=status.HTTP_201_CREATED,
     summary="Собрать комбо",
     description=(
-        "Создаёт комбо из PENDING-ставок пользователя. `total_coefficient` — "
-        "произведение коэффициентов. Ставка может входить только в одно комбо."
+        "Создаёт одну позицию YES/NO из нескольких активных событий. "
+        "Сумма списывается один раз, выплата рассчитывается по произведению ног."
     ),
     responses={
         401: {"description": "Требуется авторизация"},
-        404: {"description": "Ставки не найдены"},
-        409: {"description": "Ставка уже рассчитана или входит в другое комбо"},
+        404: {"description": "Варианты не найдены"},
+        409: {"description": "Событие не активно или ноги дублируются"},
+        422: {"description": "Недостаточно баллов"},
     },
 )
 async def create_combo(
@@ -32,7 +33,7 @@ async def create_combo(
     current_user: CurrentUser,
     db: DbSession,
 ) -> ComboRead:
-    """Создаёт комбо из ставок текущего пользователя."""
+    """Создаёт комбинированную позицию."""
     combo = await combo_service.create_combo(db, current_user, payload)
     return ComboRead.model_validate(combo)
 
@@ -76,11 +77,8 @@ async def list_my_combos(
     "/{combo_id}",
     response_model=ComboRead,
     summary="Детали комбо",
-    description="Комбо с входящими ставками и текущим статусом.",
-    responses={
-        403: {"description": "Нет доступа к чужому комбо"},
-        404: {"description": "Комбо не найдено"},
-    },
+    description="Комбо с входящими ногами и текущим статусом.",
+    responses={404: {"description": "Комбо не найдено"}},
 )
 async def get_combo(combo_id: int, current_user: CurrentUser, db: DbSession) -> ComboRead:
     """Возвращает детали комбо."""

@@ -2,11 +2,13 @@
 
 import logging
 from collections.abc import Sequence
+from datetime import datetime, timezone
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.enums import EventStatus
+from app.config import settings
+from app.core.enums import BetStatus, EventStatus
 from app.core.exceptions import ConflictError, ForbiddenError, NotFoundError
 from app.core.roles import Role
 from app.models.bet import Bet
@@ -39,15 +41,36 @@ def calculate_percentage(yes_count: int, no_count: int) -> float:
     return round(yes_count / total * 100, 2)
 
 
-def recalculate_percentages(event: Event) -> None:
-    """Пересчитывает `current_percentage` всех вариантов события."""
-    for option in event.options:
+def recalculate_percentages(options: Sequence[Option]) -> None:
+    """Пересчитывает `current_percentage` переданных вариантов."""
+    for option in options:
         option.current_percentage = calculate_percentage(option.yes_count, option.no_count)
+
+
+def can_view_event(event: Event, user: User | None) -> bool:
+    """Проверяет, доступно ли событие пользователю."""
+    if event.deleted_at is not None:
+        return False
+    if event.status in (EventStatus.ACTIVE, EventStatus.CLOSED):
+        return True
+    if user is None:
+        return False
+    if user.role in (Role.MODERATOR, Role.ADMIN):
+        return True
+    return event.creator_id == user.id
+
+
+def ensure_event_visible(event: Event, user: User | None) -> None:
+    """Скрывает недоступное событие за 404."""
+    if not can_view_event(event, user):
+        raise NotFoundError("Событие не найдено", code="event_not_found")
 
 
 async def get_event_or_404(db: AsyncSession, event_id: int) -> Event:
     """Возвращает событие или выбрасывает NotFoundError."""
-    event = await db.get(Event, event_id)
+    event = await db.scalar(
+        select(Event).where(Event.id == event_id, Event.deleted_at.is_(None))
+    )
     if event is None:
         raise NotFoundError("Событие не найдено", code="event_not_found")
     return event
@@ -66,13 +89,13 @@ def ensure_can_edit(event: Event, user: User) -> None:
 
     Raises:
         ForbiddenError: пользователь не автор и не администратор.
-        ConflictError: событие уже не находится на модерации.
+        ConflictError: событие уже не находится на модерации или отклонено.
     """
     if event.creator_id != user.id and user.role is not Role.ADMIN:
         raise ForbiddenError("Редактировать событие может только автор", code="not_event_owner")
-    if event.status is not EventStatus.PENDING_MODERATION:
+    if event.status not in (EventStatus.PENDING_MODERATION, EventStatus.REJECTED):
         raise ConflictError(
-            "Редактировать можно только событие на модерации",
+            "Редактировать можно только событие на модерации или отклонённое",
             code="event_not_editable",
         )
 
@@ -90,6 +113,19 @@ async def create_event(db: AsyncSession, creator: User, payload: EventCreate) ->
     """
     await get_category_or_404(db, payload.category_id)
 
+    pending_events = await db.scalar(
+        select(func.count(Event.id)).where(
+            Event.creator_id == creator.id,
+            Event.status == EventStatus.PENDING_MODERATION,
+            Event.deleted_at.is_(None),
+        )
+    )
+    if int(pending_events or 0) >= settings.MAX_PENDING_EVENTS_PER_USER:
+        raise ConflictError(
+            "Достигнут лимит событий на модерации",
+            code="pending_event_limit",
+        )
+
     event = Event(
         title=payload.title,
         description=payload.description,
@@ -104,7 +140,7 @@ async def create_event(db: AsyncSession, creator: User, payload: EventCreate) ->
     db.add(event)
     await db.commit()
     await db.refresh(event)
-    recalculate_percentages(event)
+    recalculate_percentages(event.options)
     await db.commit()
 
     logger.info("Создано событие id=%s автором id=%s", event.id, creator.id)
@@ -117,10 +153,10 @@ async def update_event(
     user: User,
     payload: EventUpdate,
 ) -> Event:
-    """Обновляет событие, находящееся на модерации.
+    """Обновляет событие, находящееся на модерации или отклонённое.
 
     Если передан список `options`, он полностью заменяет прежние варианты.
-    Это безопасно: у события на модерации ещё не может быть ставок.
+    Это безопасно: у такого события ещё не может быть ставок.
 
     Args:
         db: сессия БД.
@@ -137,7 +173,10 @@ async def update_event(
     if "category_id" in changes and changes["category_id"] is not None:
         await get_category_or_404(db, changes["category_id"])
 
+    nullable_fields = {"description", "image_url", "resolution_source"}
     for field, value in changes.items():
+        if value is None and field not in nullable_fields:
+            continue
         if field == "title" and value is not None:
             value = value.strip()
         setattr(event, field, value)
@@ -145,7 +184,11 @@ async def update_event(
     if payload.options is not None:
         event.options.clear()
         event.options.extend(Option(title=option.title) for option in payload.options)
-        recalculate_percentages(event)
+        recalculate_percentages(event.options)
+
+    if event.status is EventStatus.REJECTED:
+        event.status = EventStatus.PENDING_MODERATION
+        event.rejection_reason = None
 
     await db.commit()
     await db.refresh(event)
@@ -153,15 +196,15 @@ async def update_event(
 
 
 async def delete_event(db: AsyncSession, event: Event, user: User) -> None:
-    """Удаляет событие, находящееся на модерации."""
+    """Мягко удаляет событие, находящееся на модерации или отклонённое."""
     ensure_can_edit(event, user)
-    await db.delete(event)
+    event.deleted_at = datetime.now(timezone.utc)
     await db.commit()
     logger.info("Удалено событие id=%s пользователем id=%s", event.id, user.id)
 
 
 async def get_event_volumes(db: AsyncSession, event_ids: Sequence[int]) -> dict[int, int]:
-    """Возвращает сумму ставок по каждому событию.
+    """Возвращает сумму не возвращённых ставок по каждому событию.
 
     Args:
         db: сессия БД.
@@ -175,7 +218,7 @@ async def get_event_volumes(db: AsyncSession, event_ids: Sequence[int]) -> dict[
 
     stmt = (
         select(Bet.event_id, func.coalesce(func.sum(Bet.amount), 0))
-        .where(Bet.event_id.in_(list(event_ids)))
+        .where(Bet.event_id.in_(list(event_ids)), Bet.status != BetStatus.REFUNDED)
         .group_by(Bet.event_id)
     )
     rows = (await db.execute(stmt)).all()

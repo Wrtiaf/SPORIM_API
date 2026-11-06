@@ -10,6 +10,7 @@ class EventStatus(str, Enum):
     ACTIVE = "ACTIVE"
     CLOSED = "CLOSED"
     CANCELLED = "CANCELLED"
+    REJECTED = "REJECTED"
 
 
 class BetChoice(str, Enum):
@@ -28,12 +29,28 @@ class BetStatus(str, Enum):
     REFUNDED = "REFUNDED"
 
 
-class ComboStatus(str, Enum):
-    """Статус комбо-ставки."""
+class ComboSide(str, Enum):
+    """Сторона комбинированной позиции."""
 
-    ACTIVE = "ACTIVE"
+    YES = "YES"
+    NO = "NO"
+
+
+class ComboLegResult(str, Enum):
+    """Результат ноги комбинированной позиции."""
+
+    PENDING = "PENDING"
     WON = "WON"
     LOST = "LOST"
+    HALF = "HALF"
+
+
+class ComboStatus(str, Enum):
+    """Статус комбинированной позиции."""
+
+    ACTIVE = "ACTIVE"
+    SETTLED = "SETTLED"
+    CANCELLED = "CANCELLED"
 
 
 class ComplaintStatus(str, Enum):
@@ -42,3 +59,12 @@ class ComplaintStatus(str, Enum):
     PENDING = "PENDING"
     RESOLVED = "RESOLVED"
     REJECTED = "REJECTED"
+
+
+class ModerationAction(str, Enum):
+    """Действие модератора над событием."""
+
+    APPROVE = "APPROVE"
+    REJECT = "REJECT"
+    RESOLVE = "RESOLVE"
+    CANCEL = "CANCEL"

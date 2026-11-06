@@ -7,7 +7,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.enums import BetChoice, BetStatus, EventStatus
-from app.core.exceptions import ConflictError, ForbiddenError, NotFoundError
+from app.core.exceptions import ConflictError, ForbiddenError, NotFoundError, ValidationAppError
 from app.core.roles import Role
 from app.models.bet import Bet
 from app.models.event import Event
@@ -29,10 +29,11 @@ async def place_bet(
 
     Порядок операций:
         1. Блокировка строки события (`SELECT ... FOR UPDATE`) и проверка статуса.
-        2. Проверка, что пользователь ещё не ставил на это событие.
-        3. Атомарное списание баллов (защита от гонок и отрицательного баланса).
-        4. Фиксация коэффициента, создание ставки, инкремент счётчика варианта.
-        5. Пересчёт процентов всех вариантов события.
+        2. Блокировка вариантов события и проверка авторства.
+        3. Проверка, что пользователь ещё не ставил на это событие.
+        4. Атомарное списание баллов (защита от гонок и отрицательного баланса).
+        5. Фиксация коэффициента, создание ставки, инкремент счётчика варианта.
+        6. Пересчёт процентов всех вариантов события.
 
     Args:
         db: сессия БД.
@@ -45,8 +46,8 @@ async def place_bet(
 
     Raises:
         NotFoundError: вариант или событие не найдены.
-        ConflictError: событие не активно, ставка уже существует или
-            недостаточно баллов.
+        ConflictError: событие не активно или ставка уже существует.
+        ValidationAppError: недостаточно баллов.
     """
     option = await db.get(Option, option_id)
     if option is None:
@@ -54,7 +55,7 @@ async def place_bet(
 
     event = await db.scalar(
         select(Event)
-        .where(Event.id == option.event_id)
+        .where(Event.id == option.event_id, Event.deleted_at.is_(None))
         .with_for_update()
         .execution_options(populate_existing=True)
     )
@@ -67,6 +68,9 @@ async def place_bet(
             code="event_not_active",
         )
 
+    if event.creator_id == user.id:
+        raise ForbiddenError("Нельзя ставить на своё событие", code="own_event_bet")
+
     existing_bet = await db.scalar(
         select(Bet.id).where(Bet.user_id == user.id, Bet.event_id == event.id)
     )
@@ -76,21 +80,36 @@ async def place_bet(
             code="bet_already_exists",
         )
 
+    options = list(
+        (
+            await db.scalars(
+                select(Option)
+                .where(Option.event_id == event.id)
+                .order_by(Option.id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+        ).all()
+    )
+    target = next((item for item in options if item.id == option_id), None)
+    if target is None:
+        raise NotFoundError("Вариант события не найден", code="option_not_found")
+
     debit = await db.execute(
         update(User)
         .where(User.id == user.id, User.balance >= payload.amount, User.is_active.is_(True))
-        .values(
-            balance=User.balance - payload.amount,
-            total_bets=User.total_bets + 1,
-        )
+        .values(balance=User.balance - payload.amount)
     )
     if debit.rowcount == 0:
-        raise ConflictError("Недостаточно баллов на балансе", code="insufficient_balance")
+        raise ValidationAppError(
+            "Недостаточно баллов на балансе",
+            code="insufficient_balance",
+        )
 
     bet = Bet(
         user_id=user.id,
         event_id=event.id,
-        option_id=option.id,
+        option_id=target.id,
         choice=payload.choice,
         amount=payload.amount,
         coefficient=event.fixed_coefficient,
@@ -99,11 +118,11 @@ async def place_bet(
     db.add(bet)
 
     if payload.choice is BetChoice.YES:
-        option.yes_count += 1
+        target.yes_count += 1
     else:
-        option.no_count += 1
+        target.no_count += 1
 
-    recalculate_percentages(event)
+    recalculate_percentages(options)
 
     try:
         await db.commit()
@@ -123,7 +142,7 @@ async def place_bet(
         bet.id,
         user.id,
         event.id,
-        option.id,
+        target.id,
         bet.choice.value,
         bet.amount,
     )
@@ -144,7 +163,7 @@ async def get_bet_or_404(db: AsyncSession, bet_id: int, user: User | None = None
         and bet.user_id != user.id
         and user.role not in (Role.MODERATOR, Role.ADMIN)
     ):
-        raise ForbiddenError("Нет доступа к чужой ставке", code="not_bet_owner")
+        raise NotFoundError("Ставка не найдена", code="bet_not_found")
     return bet
 
 

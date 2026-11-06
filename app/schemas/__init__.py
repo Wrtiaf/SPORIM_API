@@ -16,15 +16,17 @@ from app.schemas.common import MessageResponse, Page
 from app.schemas.complaint import ComplaintCreate, ComplaintRead
 from app.schemas.event import EventCreate, EventRead, EventShort, EventUpdate
 from app.schemas.moderation import (
+    ApproveEventRequest,
     ComplaintResolveRequest,
     RejectEventRequest,
     ResolveEventRequest,
 )
-from app.schemas.option import BetCreate, OptionCreate, OptionRead
+from app.schemas.option import BetCreate, OptionCreate, OptionRead, OptionShort
 from app.schemas.user import BalanceRead, UserRead, UserShort, UserStats, UserUpdate
 
 __all__ = [
     "AdminUserUpdate",
+    "ApproveEventRequest",
     "BalanceRead",
     "BanRequest",
     "BetCreate",
@@ -46,6 +48,7 @@ __all__ = [
     "MessageResponse",
     "OptionCreate",
     "OptionRead",
+    "OptionShort",
     "Page",
     "PlatformStats",
     "RefreshRequest",

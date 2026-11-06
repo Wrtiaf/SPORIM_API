@@ -6,15 +6,22 @@ from datetime import datetime, timezone
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.enums import BetChoice, BetStatus, ComplaintStatus, EventStatus
-from app.core.exceptions import ConflictError, NotFoundError, ValidationAppError
+from app.core.enums import (
+    BetChoice,
+    BetStatus,
+    ComplaintStatus,
+    EventStatus,
+    ModerationAction,
+)
+from app.core.exceptions import ConflictError, ForbiddenError, NotFoundError, ValidationAppError
 from app.core.money import calculate_payout
 from app.models.bet import Bet
 from app.models.complaint import Complaint
 from app.models.event import Event
+from app.models.moderation_log import ModerationLog
 from app.models.user import User
 from app.services import notification_service
-from app.services.combo_service import recompute_combos_for_bets
+from app.services.combo_service import recompute_combos_for_events
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +34,7 @@ async def lock_event(db: AsyncSession, event_id: int) -> Event:
     """
     event = await db.scalar(
         select(Event)
-        .where(Event.id == event_id)
+        .where(Event.id == event_id, Event.deleted_at.is_(None))
         .with_for_update()
         .execution_options(populate_existing=True)
     )
@@ -36,7 +43,37 @@ async def lock_event(db: AsyncSession, event_id: int) -> Event:
     return event
 
 
-async def approve_event(db: AsyncSession, event_id: int) -> Event:
+def _ensure_not_own_event(event: Event, moderator: User) -> None:
+    if event.creator_id == moderator.id:
+        raise ForbiddenError(
+            "Нельзя модерировать собственное событие",
+            code="self_moderation_forbidden",
+        )
+
+
+def _log_action(
+    db: AsyncSession,
+    event: Event,
+    moderator: User,
+    action: ModerationAction,
+    reason: str | None = None,
+) -> None:
+    db.add(
+        ModerationLog(
+            event_id=event.id,
+            moderator_id=moderator.id,
+            action=action,
+            reason=reason,
+        )
+    )
+
+
+async def approve_event(
+    db: AsyncSession,
+    event_id: int,
+    moderator: User,
+    fixed_coefficient: float | None = None,
+) -> Event:
     """Одобряет событие: PENDING_MODERATION -> ACTIVE."""
     event = await lock_event(db, event_id)
     if event.status is not EventStatus.PENDING_MODERATION:
@@ -44,8 +81,15 @@ async def approve_event(db: AsyncSession, event_id: int) -> Event:
             "Одобрить можно только событие на модерации",
             code="event_not_pending",
         )
+    _ensure_not_own_event(event, moderator)
 
+    if fixed_coefficient is not None:
+        event.fixed_coefficient = fixed_coefficient
     event.status = EventStatus.ACTIVE
+    event.approved_by = moderator.id
+    event.approved_at = datetime.now(timezone.utc)
+    _log_action(db, event, moderator, ModerationAction.APPROVE)
+
     await db.commit()
     await db.refresh(event)
     logger.info("Событие id=%s одобрено", event.id)
@@ -53,23 +97,22 @@ async def approve_event(db: AsyncSession, event_id: int) -> Event:
 
 
 async def reject_event(db: AsyncSession, event_id: int, moderator: User, reason: str) -> Event:
-    """Отклоняет событие: PENDING_MODERATION -> CANCELLED с возвратом баллов.
-
-    На модерации ставок ещё нет, поэтому возврат выполняется на всякий случай
-    и остаётся корректным при изменении жизненного цикла.
-    """
+    """Отклоняет событие: PENDING_MODERATION -> REJECTED."""
     event = await lock_event(db, event_id)
     if event.status is not EventStatus.PENDING_MODERATION:
         raise ConflictError(
             "Отклонить можно только событие на модерации",
             code="event_not_pending",
         )
+    _ensure_not_own_event(event, moderator)
 
-    refunded = await _cancel_and_refund(db, event, moderator)
+    event.status = EventStatus.REJECTED
+    event.rejection_reason = reason
+    _log_action(db, event, moderator, ModerationAction.REJECT, reason)
+
     await db.commit()
     await db.refresh(event)
     logger.info("Событие id=%s отклонено: %s", event.id, reason)
-    notification_service.notify_event_cancelled(event, refunded)
     return event
 
 
@@ -97,6 +140,7 @@ async def resolve_event(
     Raises:
         ConflictError: событие не активно (в том числе при повторной фиксации).
         ValidationAppError: вариант не принадлежит событию.
+        ForbiddenError: модератор является автором события.
     """
     event = await lock_event(db, event_id)
     if event.status is not EventStatus.ACTIVE:
@@ -104,6 +148,7 @@ async def resolve_event(
             "Зафиксировать исход можно только у активного события",
             code="event_not_active",
         )
+    _ensure_not_own_event(event, moderator)
 
     winning_option = next(
         (option for option in event.options if option.id == winning_option_id),
@@ -142,19 +187,17 @@ async def resolve_event(
         await db.execute(
             update(User)
             .where(User.id == bet.user_id)
-            .values(
-                balance=User.balance + payout,
-                won_bets=User.won_bets + 1,
-            )
+            .values(balance=User.balance + payout)
         )
 
     event.status = EventStatus.CLOSED
     event.closed_at = datetime.now(timezone.utc)
+    event.winning_option_id = winning_option_id
     event.resolved_by = moderator.id
+    _log_action(db, event, moderator, ModerationAction.RESOLVE)
 
-    # Статусы ставок должны попасть в БД до пересчёта комбо.
     await db.flush()
-    await recompute_combos_for_bets(db, [bet.id for bet in pending_bets])
+    await recompute_combos_for_events(db, [event.id])
 
     await db.commit()
     await db.refresh(event)
@@ -176,8 +219,14 @@ async def cancel_event(db: AsyncSession, event_id: int, moderator: User) -> Even
             "Отменить можно только событие на модерации или активное",
             code="event_not_cancellable",
         )
+    _ensure_not_own_event(event, moderator)
 
     refunded = await _cancel_and_refund(db, event, moderator)
+    _log_action(db, event, moderator, ModerationAction.CANCEL)
+
+    await db.flush()
+    await recompute_combos_for_events(db, [event.id])
+
     await db.commit()
     await db.refresh(event)
     logger.info("Событие id=%s отменено, возвращено ставок=%s", event.id, refunded)
@@ -213,9 +262,6 @@ async def _cancel_and_refund(db: AsyncSession, event: Event, moderator: User) ->
     event.status = EventStatus.CANCELLED
     event.closed_at = datetime.now(timezone.utc)
     event.resolved_by = moderator.id
-
-    await db.flush()
-    await recompute_combos_for_bets(db, [bet.id for bet in pending_bets])
     return len(pending_bets)
 
 
@@ -230,7 +276,9 @@ async def get_complaint_or_404(db: AsyncSession, complaint_id: int) -> Complaint
 async def resolve_complaint(
     db: AsyncSession,
     complaint_id: int,
+    moderator: User,
     new_status: ComplaintStatus,
+    resolution_comment: str | None = None,
 ) -> Complaint:
     """Переводит жалобу в RESOLVED или REJECTED."""
     complaint = await get_complaint_or_404(db, complaint_id)
@@ -242,6 +290,8 @@ async def resolve_complaint(
 
     complaint.status = new_status
     complaint.resolved_at = datetime.now(timezone.utc)
+    complaint.resolved_by = moderator.id
+    complaint.resolution_comment = resolution_comment
     await db.commit()
     await db.refresh(complaint)
     logger.info("Жалоба id=%s обработана: %s", complaint.id, new_status.value)

@@ -14,6 +14,7 @@ from app.schemas.common import Page
 from app.schemas.complaint import ComplaintRead
 from app.schemas.event import EventRead
 from app.schemas.moderation import (
+    ApproveEventRequest,
     ComplaintResolveRequest,
     RejectEventRequest,
     ResolveEventRequest,
@@ -43,7 +44,10 @@ async def list_pending_events(
     offset: OffsetParam = 0,
 ) -> Page[EventRead]:
     """Возвращает очередь модерации."""
-    conditions = [Event.status == EventStatus.PENDING_MODERATION]
+    conditions = [
+        Event.status == EventStatus.PENDING_MODERATION,
+        Event.deleted_at.is_(None),
+    ]
 
     total = await db.scalar(select(func.count(Event.id)).where(*conditions)) or 0
     events = list(
@@ -70,20 +74,26 @@ async def list_pending_events(
     "/events/{event_id}/approve",
     response_model=EventRead,
     summary="Одобрить событие",
-    description="PENDING_MODERATION -> ACTIVE.",
+    description="PENDING_MODERATION -> ACTIVE с подтверждением коэффициента.",
     responses={
-        403: {"description": "Недостаточно прав"},
+        403: {"description": "Недостаточно прав или событие создано модератором"},
         404: {"description": "Событие не найдено"},
         409: {"description": "Событие не на модерации"},
     },
 )
 async def approve_event(
     event_id: int,
-    _: ModeratorUser,
+    moderator: ModeratorUser,
     db: DbSession,
+    payload: ApproveEventRequest | None = None,
 ) -> EventRead:
     """Одобряет событие."""
-    event = await moderation_service.approve_event(db, event_id)
+    event = await moderation_service.approve_event(
+        db,
+        event_id,
+        moderator,
+        payload.fixed_coefficient if payload else None,
+    )
     return await _event_read(db, event)
 
 
@@ -91,9 +101,9 @@ async def approve_event(
     "/events/{event_id}/reject",
     response_model=EventRead,
     summary="Отклонить событие",
-    description="PENDING_MODERATION -> CANCELLED. Причина сохраняется в логах.",
+    description="PENDING_MODERATION -> REJECTED. Причина сохраняется в событии.",
     responses={
-        403: {"description": "Недостаточно прав"},
+        403: {"description": "Недостаточно прав или событие создано модератором"},
         404: {"description": "Событие не найдено"},
         409: {"description": "Событие не на модерации"},
     },
@@ -118,7 +128,7 @@ async def reject_event(
         "получают выплату `amount * coefficient` (округление половина вверх)."
     ),
     responses={
-        403: {"description": "Недостаточно прав"},
+        403: {"description": "Недостаточно прав или событие создано модератором"},
         404: {"description": "Событие не найдено"},
         409: {"description": "Событие не активно или уже рассчитано"},
         422: {"description": "Вариант не принадлежит событию"},
@@ -146,7 +156,7 @@ async def resolve_event(
     summary="Отменить событие",
     description="ACTIVE/PENDING_MODERATION -> CANCELLED с возвратом баллов.",
     responses={
-        403: {"description": "Недостаточно прав"},
+        403: {"description": "Недостаточно прав или событие создано модератором"},
         404: {"description": "Событие не найдено"},
         409: {"description": "Событие уже закрыто или отменено"},
     },
@@ -218,9 +228,15 @@ async def list_complaints(
 async def resolve_complaint(
     complaint_id: int,
     payload: ComplaintResolveRequest,
-    _: ModeratorUser,
+    moderator: ModeratorUser,
     db: DbSession,
 ) -> ComplaintRead:
     """Обрабатывает жалобу."""
-    complaint = await moderation_service.resolve_complaint(db, complaint_id, payload.status)
+    complaint = await moderation_service.resolve_complaint(
+        db,
+        complaint_id,
+        moderator,
+        payload.status,
+        payload.resolution_comment,
+    )
     return ComplaintRead.model_validate(complaint)
